@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Settings, Maximize, Minimize, Hand, Upload, Palette, Video, VideoOff, Trash2, Box } from 'lucide-react';
+import { Settings, Maximize, Minimize, Hand, Upload, Palette, Video, VideoOff, Trash2, Box, Image as ImageIcon } from 'lucide-react';
 import { ParticleConfig, ImageModel, GestureType, HandData } from '../types';
 
 interface UIOverlayProps {
@@ -50,6 +50,7 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
       case GestureType.POINT: return <span className="text-cyan-400 font-bold">MOVE / SELECT</span>;
       case GestureType.OK_SIGN: return <span className="text-orange-400 font-bold">NEXT MODEL</span>;
       case GestureType.THUMB_SCATTER: return <span className="text-fuchsia-400 font-bold animate-pulse">THUMB SCATTER</span>;
+      case GestureType.TWO_HAND_ROTATION: return <span className="text-yellow-400 font-bold">DUAL CONTROL</span>;
       default: return <span className="text-gray-400">IDLE</span>;
     }
   };
@@ -248,24 +249,42 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
           </label>
           
           <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-300">Start Color</span>
-              <input 
-                type="color" 
-                value={config.color1} 
-                onChange={(e) => setConfig({...config, color1: e.target.value})}
-                className="w-8 h-8 rounded-full border border-white/20 cursor-pointer bg-transparent p-0"
-              />
-            </div>
-            
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-300">End Color</span>
-              <input 
-                type="color" 
-                value={config.color2} 
-                onChange={(e) => setConfig({...config, color2: e.target.value})}
-                className="w-8 h-8 rounded-full border border-white/20 cursor-pointer bg-transparent p-0"
-              />
+            {/* Color Controls */}
+            {!config.useImageColors && (
+                <>
+                <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-300">Start Color</span>
+                <input 
+                    type="color" 
+                    value={config.color1} 
+                    onChange={(e) => setConfig({...config, color1: e.target.value})}
+                    className="w-8 h-8 rounded-full border border-white/20 cursor-pointer bg-transparent p-0"
+                />
+                </div>
+                
+                <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-300">End Color</span>
+                <input 
+                    type="color" 
+                    value={config.color2} 
+                    onChange={(e) => setConfig({...config, color2: e.target.value})}
+                    className="w-8 h-8 rounded-full border border-white/20 cursor-pointer bg-transparent p-0"
+                />
+                </div>
+                </>
+            )}
+
+            <div className="flex justify-between items-center bg-white/5 p-2 rounded-lg">
+                <span className="text-sm text-gray-300 flex items-center gap-2"><ImageIcon size={14}/> Original Colors</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                    <input 
+                        type="checkbox" 
+                        checked={config.useImageColors} 
+                        onChange={(e) => setConfig({...config, useImageColors: e.target.checked})}
+                        className="sr-only peer" 
+                    />
+                    <div className="w-9 h-5 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-500"></div>
+                </label>
             </div>
 
              <div className="space-y-2">
@@ -281,26 +300,28 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
                 />
             </div>
 
-            <div className="flex gap-2 p-1 bg-white/5 rounded-lg">
-                <button 
-                    onClick={() => setConfig({...config, gradientType: 'radial'})}
-                    className={`flex-1 py-1.5 rounded text-xs font-medium transition-colors ${config.gradientType === 'radial' ? 'bg-white/20 text-white' : 'text-gray-400'}`}
-                >
-                    Radial
-                </button>
-                <button 
-                    onClick={() => setConfig({...config, gradientType: 'angular'})}
-                    className={`flex-1 py-1.5 rounded text-xs font-medium transition-colors ${config.gradientType === 'angular' ? 'bg-white/20 text-white' : 'text-gray-400'}`}
-                >
-                    Angular
-                </button>
-                 <button 
-                    onClick={() => setConfig({...config, gradientType: 'linear'})}
-                    className={`flex-1 py-1.5 rounded text-xs font-medium transition-colors ${config.gradientType === 'linear' ? 'bg-white/20 text-white' : 'text-gray-400'}`}
-                >
-                    Linear
-                </button>
-            </div>
+            {!config.useImageColors && (
+                <div className="flex gap-2 p-1 bg-white/5 rounded-lg">
+                    <button 
+                        onClick={() => setConfig({...config, gradientType: 'radial'})}
+                        className={`flex-1 py-1.5 rounded text-xs font-medium transition-colors ${config.gradientType === 'radial' ? 'bg-white/20 text-white' : 'text-gray-400'}`}
+                    >
+                        Radial
+                    </button>
+                    <button 
+                        onClick={() => setConfig({...config, gradientType: 'angular'})}
+                        className={`flex-1 py-1.5 rounded text-xs font-medium transition-colors ${config.gradientType === 'angular' ? 'bg-white/20 text-white' : 'text-gray-400'}`}
+                    >
+                        Angular
+                    </button>
+                    <button 
+                        onClick={() => setConfig({...config, gradientType: 'linear'})}
+                        className={`flex-1 py-1.5 rounded text-xs font-medium transition-colors ${config.gradientType === 'linear' ? 'bg-white/20 text-white' : 'text-gray-400'}`}
+                    >
+                        Linear
+                    </button>
+                </div>
+            )}
           </div>
         </div>
 

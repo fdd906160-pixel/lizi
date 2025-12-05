@@ -170,23 +170,32 @@ const Particles: React.FC<ParticlesProps> = ({ imageSrc, handData, config }) => 
     const tempColor = new THREE.Color();
 
     for (let i = 0; i < count; i++) {
-      let mixFactor = 0;
-      if (config.gradientType === 'radial') {
-         const dist = Math.sqrt(particles[i].bx * particles[i].bx + particles[i].by * particles[i].by);
-         mixFactor = Math.min(dist / 60, 1);
-      } else if (config.gradientType === 'linear') {
-         mixFactor = (particles[i].by + 50) / 100;
-         mixFactor = Math.max(0, Math.min(1, mixFactor));
+      if (config.useImageColors) {
+          // Use original image color stored in particle
+          const original = particles[i].color;
+          colors[i * 3] = original.r;
+          colors[i * 3 + 1] = original.g;
+          colors[i * 3 + 2] = original.b;
       } else {
-         const angle = Math.atan2(particles[i].by, particles[i].bx);
-         mixFactor = (angle + Math.PI) / (2 * Math.PI);
+          // Calculate Gradient
+          let mixFactor = 0;
+          if (config.gradientType === 'radial') {
+             const dist = Math.sqrt(particles[i].bx * particles[i].bx + particles[i].by * particles[i].by);
+             mixFactor = Math.min(dist / 60, 1);
+          } else if (config.gradientType === 'linear') {
+             mixFactor = (particles[i].by + 50) / 100;
+             mixFactor = Math.max(0, Math.min(1, mixFactor));
+          } else {
+             const angle = Math.atan2(particles[i].by, particles[i].bx);
+             mixFactor = (angle + Math.PI) / (2 * Math.PI);
+          }
+          
+          tempColor.copy(c1).lerp(c2, mixFactor);
+          
+          colors[i * 3] = tempColor.r;
+          colors[i * 3 + 1] = tempColor.g;
+          colors[i * 3 + 2] = tempColor.b;
       }
-      
-      tempColor.copy(c1).lerp(c2, mixFactor);
-      
-      colors[i * 3] = tempColor.r;
-      colors[i * 3 + 1] = tempColor.g;
-      colors[i * 3 + 2] = tempColor.b;
     }
 
     colorBufferRef.current = colors;
@@ -396,8 +405,9 @@ const Particles: React.FC<ParticlesProps> = ({ imageSrc, handData, config }) => 
                 vertexColors 
                 roughness={0.4} 
                 metalness={0.6}
-                emissive={new THREE.Color(config.color1)}
-                emissiveIntensity={0.2}
+                // Use black emissive if using image colors to prevent tinting, otherwise use color1
+                emissive={config.useImageColors ? new THREE.Color(0x000000) : new THREE.Color(config.color1)}
+                emissiveIntensity={config.useImageColors ? 0 : 0.2}
             />
         </instancedMesh>
         

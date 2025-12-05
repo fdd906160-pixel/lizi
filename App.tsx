@@ -19,7 +19,8 @@ const App: React.FC = () => {
     gradientType: 'radial',
     size: 0.25,
     useDepth: false, // Default to 2D
-    depthIntensity: 30 // Default depth scale
+    depthIntensity: 30, // Default depth scale
+    useImageColors: false // Default to gradient colors
   });
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isStarted, setIsStarted] = useState(false);
@@ -165,8 +166,8 @@ const App: React.FC = () => {
           };
           setModels(prev => [...prev, newModel]);
           setCurrentModel(newModel);
-          // Auto-enable 3D for uploads as they are often photos
-          setConfig(prev => ({...prev, useDepth: true}));
+          // Auto-enable 3D and Image Colors for uploads as they are often photos
+          setConfig(prev => ({...prev, useDepth: true, useImageColors: true}));
         }
       };
       reader.readAsDataURL(e.target.files[0]);
