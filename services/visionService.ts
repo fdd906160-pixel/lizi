@@ -1,34 +1,71 @@
+
 import { FilesetResolver, HandLandmarker, DrawingUtils, HandLandmarkerResult } from '@mediapipe/tasks-vision';
 import { HandData, GestureType } from '../types';
 
 let handLandmarker: HandLandmarker | null = null;
 let drawingUtils: DrawingUtils | null = null;
 let runningMode: "IMAGE" | "VIDEO" = "VIDEO";
+let isInitializing = false;
+
+// --- Smoothing State ---
+const GESTURE_HISTORY_LENGTH = 5; 
+let previousHandData: HandData | null = null;
+let previousRawWrist: { x: number, y: number, z: number } | null = null; 
+const gestureHistory: GestureType[] = [];
 
 export const initializeHandLandmarker = async (): Promise<void> => {
+  if (handLandmarker) return;
+  if (isInitializing) return;
+  isInitializing = true;
   try {
     const vision = await FilesetResolver.forVisionTasks(
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm"
     );
-    handLandmarker = await HandLandmarker.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-        delegate: "GPU"
-      },
-      runningMode: runningMode,
-      numHands: 1 // Reverted to 1 hand as we don't need multi-hand logic anymore
-    });
-    console.log("HandLandmarker initialized");
+    const sharedOptions = {
+        runningMode: runningMode,
+        numHands: 1,
+        // 提高置信度阈值，减少面部或其他背景物体的误识别
+        minHandDetectionConfidence: 0.8, 
+        minTrackingConfidence: 0.7,
+        minHandPresenceConfidence: 0.8,
+    };
+    try {
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                delegate: "GPU"
+            },
+            ...sharedOptions
+        });
+    } catch (gpuError) {
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                delegate: "CPU"
+            },
+            ...sharedOptions
+        });
+    }
   } catch (error) {
-    console.error("Error initializing hand landmarker:", error);
-    throw new Error("Failed to load hand tracking model");
+    isInitializing = false;
+    throw new Error("Failed to load hand tracking model.");
   }
+  isInitializing = false;
+};
+
+const lerp = (start: number, end: number, factor: number) => start + (end - start) * factor;
+
+const smoothPosition = (current: {x: number, y: number, z: number}, prev: {x: number, y: number, z: number} | null, factor: number) => {
+    if (!prev) return current;
+    return {
+        x: lerp(prev.x, current.x, factor),
+        y: lerp(prev.y, current.y, factor),
+        z: lerp(prev.z, current.z, factor)
+    };
 };
 
 export const detectHands = (video: HTMLVideoElement, canvas: HTMLCanvasElement | null = null): HandData | null => {
   if (!handLandmarker) return null;
-
-  // Ensure video is playing and has data
   if (video.currentTime <= 0 || video.paused || video.ended || !video.readyState) return null;
 
   let results: HandLandmarkerResult;
@@ -38,164 +75,116 @@ export const detectHands = (video: HTMLVideoElement, canvas: HTMLCanvasElement |
       return null;
   }
   
-  // --- Visualization Logic ---
   if (canvas) {
       const ctx = canvas.getContext('2d');
       if (ctx) {
-          // Sync canvas resolution to video resolution
           if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
               canvas.width = video.videoWidth;
               canvas.height = video.videoHeight;
           }
-          
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-
           if (results.landmarks && results.landmarks.length > 0) {
-              if (!drawingUtils) {
-                  drawingUtils = new DrawingUtils(ctx);
-              } 
-              
+              if (!drawingUtils) drawingUtils = new DrawingUtils(ctx);
               for (const landmarks of results.landmarks) {
-                  drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {
-                      color: "#00ffff", // Cyan lines
-                      lineWidth: 2 // Thinner lines for elegance
-                  });
-                  drawingUtils.drawLandmarks(landmarks, {
-                      color: "#ffffff", // White joints
-                      lineWidth: 1,
-                      radius: 2 // Smaller joints
-                  });
+                  drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, { color: "#00ffff", lineWidth: 2 });
+                  drawingUtils.drawLandmarks(landmarks, { color: "#ffffff", lineWidth: 1, radius: 2 });
               }
           }
       }
   }
 
-  if (results.landmarks.length > 0) {
-    // We primarily use the first hand for cursor/interaction logic
-    const landmarks = results.landmarks[0];
-    
-    // Key landmarks map
-    // 0: Wrist
-    // 1-4: Thumb (CMC, MCP, IP, Tip)
-    // 5-8: Index (MCP, PIP, DIP, Tip)
-    // 9-12: Middle (MCP, PIP, DIP, Tip)
-    // 13-16: Ring (MCP, PIP, DIP, Tip)
-    // 17-20: Pinky (MCP, PIP, DIP, Tip)
+  // 关键校验：确保识别到了明确的左右手属性，进一步过滤面部误报
+  if (results.landmarks.length > 0 && results.handedness && results.handedness.length > 0) {
+    // MediaPipe HandLandmarker 通常在误识别脸部时，handedness 的 score 会非常低
+    if (results.handedness[0][0].score < 0.85) return null;
 
+    const landmarks = results.landmarks[0];
     const wrist = landmarks[0];
-    
-    const thumbMCP = landmarks[2];
     const thumbTip = landmarks[4];
-    
     const indexMCP = landmarks[5];
     const indexPip = landmarks[6];
     const indexTip = landmarks[8];
-    
-    const middleMCP = landmarks[9];
     const middlePip = landmarks[10];
     const middleTip = landmarks[12];
-    
-    const ringMCP = landmarks[13];
     const ringPip = landmarks[14];
     const ringTip = landmarks[16];
-    
-    const pinkyMCP = landmarks[17];
     const pinkyPip = landmarks[18];
     const pinkyTip = landmarks[20];
-    
     const indexBase = landmarks[5];
 
-    // --- Gesture Recognition Logic ---
-    
-    // Helper for euclidean distance
     const dist = (p1: any, p2: any) => Math.hypot(p1.x - p2.x, p1.y - p2.y, p1.z - p2.z);
+    const handScale = dist(wrist, indexMCP);
+    
+    // 增加物理尺寸校验：如果识别出的“手”太小，极可能是背景噪声或面部局部特征
+    if (handScale < 0.04) return null;
+    
+    const EXTENSION_BUFFER = handScale * 0.15; 
+    const PINCH_THRESHOLD = handScale * 0.55;
 
-    // 1. Robust Finger Extension Check
-    // A finger is extended if the Tip is significantly further from the Wrist than the PIP joint is.
-    const isFingerExtended = (tip: any, pip: any) => dist(tip, wrist) > dist(pip, wrist) + 0.02;
+    const isFingerExtended = (tip: any, pip: any) => dist(tip, wrist) > dist(pip, wrist) + EXTENSION_BUFFER;
 
     const indexExt = isFingerExtended(indexTip, indexPip);
     const middleExt = isFingerExtended(middleTip, middlePip);
     const ringExt = isFingerExtended(ringTip, ringPip);
     const pinkyExt = isFingerExtended(pinkyTip, pinkyPip);
+    const thumbExt = dist(thumbTip, indexMCP) > handScale * 0.5;
 
-    // 2. Robust Thumb Extension Check
-    // Thumb is considered "Extended" (Open) if the tip is far away from the Index Finger Base (MCP).
-    // If it's close to the index base or palm, it's considered "Tucked" or "Closed".
-    // We use Index MCP as a stable reference point.
-    const thumbIndexDist = dist(thumbTip, indexMCP);
-    // Threshold adjusted: > 0.09 usually means thumb is sticking out away from palm/index base
-    const thumbExt = thumbIndexDist > 0.09; 
-
-    // 3. Pinch Detection
-    const pinchDist = dist(thumbTip, indexTip);
-    const isPinchPose = pinchDist < 0.06;
-
-    // 4. Calculate "Open-ness" for scaling
-    // Average distance of finger tips from wrist
     const tips = [indexTip, middleTip, ringTip, pinkyTip];
-    const avgDistFromWrist = tips.reduce((acc, tip) => {
-        return acc + dist(tip, wrist);
-    }, 0) / 4;
-    // Normalize Openness (0.15 approx fist, 0.45 approx open)
-    const rawOpenness = (avgDistFromWrist - 0.2) / (0.5 - 0.2);
-    const openness = Math.min(Math.max(rawOpenness, 0), 1);
-
-
-    // --- Gesture Classification ---
+    const avgDistFromWrist = tips.reduce((acc, tip) => acc + dist(tip, wrist), 0) / 4;
     
-    let gesture = GestureType.NONE;
+    const minOpenDist = handScale * 1.2; 
+    const maxOpenDist = handScale * 2.8;
+    const currentOpenness = Math.min(Math.max((avgDistFromWrist - minOpenDist) / (maxOpenDist - minOpenDist), 0), 1);
 
-    // Priority 1: OK Sign (Specific Pinch with other fingers open)
-    // Thumb and Index touching. Middle, Ring, Pinky extended.
+    let detectedGesture: GestureType = GestureType.NONE;
+    const isPinchPose = dist(thumbTip, indexTip) < PINCH_THRESHOLD;
     const isOkSign = isPinchPose && middleExt && ringExt && pinkyExt;
-
-    // Priority 2: Thumb Scatter (Thumb Up)
-    // Thumb extended, other fingers curled.
-    // Thumb is ext. Index, Middle, Ring, Pinky are NOT ext.
-    const isThumbScatter = thumbExt && !indexExt && !middleExt && !ringExt && !pinkyExt;
-
-    // Priority 3: General Interaction Gestures
-
-    // Open Hand: All 5 fingers extended (including Thumb).
     const isOpen = indexExt && middleExt && ringExt && pinkyExt && thumbExt;
+    const isFist = !indexExt && !middleExt && !ringExt && !pinkyExt;
 
-    // Fist: All fingers curled.
-    const isFist = !indexExt && !middleExt && !ringExt && !pinkyExt && !thumbExt;
+    if (isOkSign) detectedGesture = GestureType.OK_SIGN;
+    else if (isPinchPose) detectedGesture = GestureType.PINCH;
+    else if (isOpen) detectedGesture = GestureType.OPEN_HAND;
+    else if (isFist) detectedGesture = GestureType.CLOSED_FIST;
 
-    // Point: Index extended, others curled.
-    const isPoint = indexExt && !middleExt && !ringExt && !pinkyExt;
+    let movementVelocity = 0;
+    if (previousRawWrist) movementVelocity = dist(wrist, previousRawWrist) / handScale; 
+    previousRawWrist = { x: wrist.x, y: wrist.y, z: wrist.z };
 
-    // Pinch: Thumb and Index touching, others usually curled or relaxed.
-    const isPinch = isPinchPose && !isOkSign;
+    gestureHistory.push(detectedGesture);
+    if (gestureHistory.length > GESTURE_HISTORY_LENGTH) gestureHistory.shift();
 
-    // --- Decision Tree ---
-    if (isOkSign) {
-        gesture = GestureType.OK_SIGN;
-    } else if (isThumbScatter) {
-        gesture = GestureType.THUMB_SCATTER;
-    } else if (isPoint) {
-        gesture = GestureType.POINT;
-    } else if (isPinch) {
-        gesture = GestureType.PINCH;
-    } else if (isOpen) {
-        gesture = GestureType.OPEN_HAND;
-    } else if (isFist) {
-        gesture = GestureType.CLOSED_FIST;
-    }
+    const isFastMove = movementVelocity > 0.08; 
+    const finalSmoothingFactor = Math.min(0.15 + (isFastMove ? 0.7 : 0), 0.9);
 
-    // Calculate approximate Z rotation (roll) of the hand using Wrist and IndexBase
+    const rawPinchPos = isPinchPose ? { x: (thumbTip.x + indexTip.x) / 2, y: (thumbTip.y + indexTip.y) / 2, z: (thumbTip.z + indexTip.z) / 2 } : null;
+    const rawPointerPos = { x: indexTip.x, y: indexTip.y, z: indexTip.z };
+    const rawPalmPos = { x: landmarks[9].x, y: landmarks[9].y, z: landmarks[9].z };
+
+    const smoothedPinch = rawPinchPos ? smoothPosition(rawPinchPos, previousHandData?.pinchPosition || null, finalSmoothingFactor) : null;
+    const smoothedPointer = smoothPosition(rawPointerPos, previousHandData?.pointerPosition || null, finalSmoothingFactor);
+    const smoothedPalm = smoothPosition(rawPalmPos, previousHandData?.palmPosition || null, finalSmoothingFactor);
     const rotation = Math.atan2(indexBase.y - wrist.y, indexBase.x - wrist.x);
+    
+    const smoothedOpenness = previousHandData 
+        ? lerp(previousHandData.openness, currentOpenness, 0.15) 
+        : currentOpenness;
 
-    return {
-      gesture,
-      pinchPosition: isPinch || isOkSign ? { x: (thumbTip.x + indexTip.x) / 2, y: (thumbTip.y + indexTip.y) / 2, z: (thumbTip.z + indexTip.z) / 2 } : null,
-      palmPosition: { x: landmarks[9].x, y: landmarks[9].y, z: landmarks[9].z },
-      pointerPosition: { x: indexTip.x, y: indexTip.y, z: indexTip.z },
-      rotation,
-      openness
+    const finalHandData: HandData = {
+        gesture: detectedGesture,
+        pinchPosition: smoothedPinch,
+        pointerPosition: smoothedPointer,
+        palmPosition: smoothedPalm,
+        rotation: rotation,
+        openness: smoothedOpenness
     };
+
+    previousHandData = finalHandData;
+    return finalHandData;
   }
 
+  previousHandData = null;
+  previousRawWrist = null;
+  gestureHistory.length = 0;
   return null;
 };

@@ -1,5 +1,5 @@
 {
-  "name": "Particle Morph 3D",
+  "name": "IP手势交互",
   "description": "A real-time interactive 3D particle system controlled by hand gestures using MediaPipe and Three.js.",
   "requestFramePermissions": [
     "camera"

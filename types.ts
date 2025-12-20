@@ -1,3 +1,4 @@
+
 import * as THREE from 'three'
 
 export enum GestureType {
@@ -25,13 +26,19 @@ export interface ParticleConfig {
   color2: string;
   gradientType: 'radial' | 'angular' | 'linear';
   size: number;
-  useDepth: boolean; // Enable 3D depth from image brightness
-  depthIntensity: number; // Strength of the Z-displacement
-  useImageColors: boolean; // Use the original image colors instead of gradient
+  glowIntensity: number; 
+  useDepth: boolean; 
+  depthIntensity: number; 
+  useImageColors: boolean;
+  metalness: number; // 0-1 金属质感
+  roughness: number; // 0-1 粗糙度
+  brightness: number; // 颜色明亮度增强
 }
 
 export interface ImageModel {
   id: string;
   name: string;
   src: string;
+  type: 'image' | '3d';
+  extension?: string;
 }
