@@ -6,11 +6,11 @@ import * as THREE from 'three';
 import Particles from './components/Particles';
 import UIOverlay from './components/UIOverlay';
 import { SpaceGame } from './components/SpaceGame';
-import { initializeHandLandmarker, detectHands } from './services/visionService';
-import { startMusic, stopMusic, playHitSound, playGameOverSound } from './services/audioService';
+import { initializeHandLandmarker, detectHands, DetectionResult } from './services/visionService';
+import { startMusic, stopMusic, playHitSound, playGameOverSound, playHealSound, playSlowSound } from './services/audioService';
 import { HandData, GestureType, ParticleConfig, ImageModel } from './types';
 import { MODELS } from './constants';
-import { Camera, Loader2, AlertCircle, Video, VideoOff, Gamepad2, Play, Sparkles, Zap, RefreshCw } from 'lucide-react';
+import { AlertCircle, Zap, RefreshCw } from 'lucide-react';
 
 extend(THREE as any);
 
@@ -19,10 +19,17 @@ interface HighScore {
   date: string;
 }
 
+type GameType = 'SINGLE' | 'DOUBLE';
+
 const App: React.FC = () => {
-  const [handData, setHandData] = useState<HandData | null>(null);
+  const [isStarted, setIsStarted] = useState(false);
+  const [gameType, setGameType] = useState<GameType>('SINGLE');
+  const [hands, setHands] = useState<HandData[]>([]);
   const [models, setModels] = useState<ImageModel[]>(MODELS);
-  const [currentModel, setCurrentModel] = useState<ImageModel>(MODELS[0]);
+  
+  const [topModel, setTopModel] = useState<ImageModel>(MODELS[0]);
+  const [bottomModel, setBottomModel] = useState<ImageModel>(MODELS.length > 1 ? MODELS[1] : MODELS[0]);
+  
   const [config, setConfig] = useState<ParticleConfig>({
     color1: '#00ffff',
     color2: '#ff00ff',
@@ -36,7 +43,7 @@ const App: React.FC = () => {
     roughness: 0.2,
     brightness: 1.0
   });
-  const [isStarted, setIsStarted] = useState(false);
+
   const [isLoading, setIsLoading] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isEngineReady, setIsEngineReady] = useState(false);
@@ -46,20 +53,25 @@ const App: React.FC = () => {
 
   const [gameMode, setGameMode] = useState(false);
   const [isGameOver, setIsGameOver] = useState(false);
+  const [isBursting, setIsBursting] = useState(false);
+  const [isSuperBursting, setIsSuperBursting] = useState(false);
   const [score, setScore] = useState(0);
-  const [lives, setLives] = useState(3);
-  const [playerHit, setPlayerHit] = useState(false);
-  const [highScores, setHighScores] = useState<HighScore[]>([]);
+  const [lives, setLives] = useState<[number, number]>([10, 10]);
+  const [playerHit, setPlayerHit] = useState<[boolean, boolean]>([false, false]);
+  const [playerHeal, setPlayerHeal] = useState<[boolean, boolean]>([false, false]);
+  const [slowEffectActive, setSlowEffectActive] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const requestRef = useRef<number>(0);
   const lastSwitchTimeRef = useRef<number>(0);
+  const burstTimeoutRef = useRef<number>(0);
+  const superBurstTimeoutRef = useRef<number>(0);
+  const slowTimerTimeoutRef = useRef<number>(0);
   
-  // Refs for physics engine synchronization
-  const playerPosRef = useRef<THREE.Vector3>(new THREE.Vector3());
-  const playerScaleRef = useRef<number>(1);
+  const playerPosRefs = [useRef<THREE.Vector3>(new THREE.Vector3()), useRef<THREE.Vector3>(new THREE.Vector3())];
+  const playerScaleRefs = [useRef<number>(1), useRef<number>(1)];
 
   useEffect(() => {
     const preload = async () => {
@@ -82,10 +94,11 @@ const App: React.FC = () => {
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       stopMusic();
+      clearTimeout(slowTimerTimeoutRef.current);
     };
   }, []);
 
-  const handleStart = async () => {
+  const handleStartInitialization = async () => {
     setIsLoading(true);
     try {
       if (!isEngineReady) await initializeHandLandmarker();
@@ -95,7 +108,7 @@ const App: React.FC = () => {
       streamRef.current = stream;
       setIsStarted(true);
     } catch (err: any) {
-      setError("Failed to initialize system. Check camera permissions.");
+      setError("Failed to initialize system.");
     } finally {
       setIsLoading(false);
     }
@@ -103,9 +116,7 @@ const App: React.FC = () => {
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(err => {
-        console.error(`Error attempting to enable full-screen mode: ${err.message}`);
-      });
+      document.documentElement.requestFullscreen();
     } else {
       document.exitFullscreen();
     }
@@ -122,24 +133,39 @@ const App: React.FC = () => {
     if (!isStarted) return;
     const loop = () => {
       if (videoRef.current && videoRef.current.readyState >= 2) {
-        const data = detectHands(videoRef.current, showCamera ? canvasRef.current : null);
-        setHandData(data);
-        if (data && !gameMode && data.gesture === GestureType.OK_SIGN) {
-            if (Date.now() - lastSwitchTimeRef.current > 1500) {
-                const idx = models.findIndex(m => m.id === currentModel.id);
-                if (models.length > 0) {
-                  const nextIdx = (idx + 1) % models.length;
-                  setCurrentModel(models[nextIdx]);
-                  lastSwitchTimeRef.current = Date.now();
+        const result = detectHands(videoRef.current, showCamera ? canvasRef.current : null);
+        if (result) {
+            setHands(result.hands);
+            if (result.superBurstTrigger && !isSuperBursting) {
+                setIsSuperBursting(true);
+                if (window.navigator.vibrate) window.navigator.vibrate([100, 50, 100]);
+                superBurstTimeoutRef.current = window.setTimeout(() => setIsSuperBursting(false), 2500);
+            }
+            if (result.burstTrigger && !isBursting) {
+                setIsBursting(true);
+                if (window.navigator.vibrate) window.navigator.vibrate(50);
+                burstTimeoutRef.current = window.setTimeout(() => setIsBursting(false), 2000);
+            }
+            if (!gameMode && result.hands.length > 0 && result.hands[0].gesture === GestureType.OK_SIGN) {
+                if (Date.now() - lastSwitchTimeRef.current > 1500) {
+                    const idx = models.findIndex(m => m.id === topModel.id);
+                    const nextIdx = (idx + 1) % models.length;
+                    setTopModel(models[nextIdx]);
+                    if (gameType === 'DOUBLE' && models.length > 1) {
+                        setBottomModel(models[(nextIdx + 1) % models.length]);
+                    }
+                    lastSwitchTimeRef.current = Date.now();
                 }
             }
+        } else {
+            setHands([]);
         }
       }
       requestRef.current = requestAnimationFrame(loop);
     };
     requestRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(requestRef.current);
-  }, [isStarted, currentModel, models, gameMode, showCamera]);
+  }, [isStarted, topModel, bottomModel, models, gameMode, showCamera, isBursting, isSuperBursting, gameType]);
 
   useEffect(() => {
     if (gameMode && !isGameOver) {
@@ -158,28 +184,17 @@ const App: React.FC = () => {
 
       if (is3D) {
           const url = URL.createObjectURL(file);
-          const newModel: ImageModel = {
-              id: 'custom-' + Date.now(),
-              name: file.name,
-              src: url,
-              type: '3d',
-              extension: extension
-          };
+          const newModel: ImageModel = { id: 'custom-' + Date.now(), name: file.name, src: url, type: '3d', extension: extension };
           setModels(prev => [...prev, newModel]);
-          setCurrentModel(newModel);
+          setTopModel(newModel);
           setIsImporting(false);
       } else {
           const reader = new FileReader();
           reader.onload = (ev) => {
             if (ev.target?.result) {
-              const newModel: ImageModel = {
-                id: 'custom-' + Date.now(),
-                name: file.name.split('.')[0] || 'Image Import',
-                src: ev.target.result as string,
-                type: 'image'
-              };
+              const newModel: ImageModel = { id: 'custom-' + Date.now(), name: file.name.split('.')[0], src: ev.target.result as string, type: 'image' };
               setModels(prev => [...prev, newModel]);
-              setCurrentModel(newModel);
+              setTopModel(newModel);
               setConfig(prev => ({...prev, useDepth: true, useImageColors: true}));
               setIsImporting(false);
             }
@@ -192,30 +207,89 @@ const App: React.FC = () => {
   const handleDeleteModel = (id: string) => {
     setModels(prev => {
         const filtered = prev.filter(m => m.id !== id);
-        if (currentModel.id === id) {
-            if (filtered.length > 0) setCurrentModel(filtered[0]);
-            else { setCurrentModel(MODELS[0]); return MODELS; }
-        }
-        return filtered;
+        if (topModel.id === id) setTopModel(filtered.length > 0 ? filtered[0] : MODELS[0]);
+        if (bottomModel.id === id) setBottomModel(filtered.length > 1 ? filtered[1] : MODELS[0]);
+        return filtered.length > 0 ? filtered : MODELS;
     });
+  };
+
+  const handleToggleGameMode = () => {
+    if (gameMode) {
+      setGameType('SINGLE');
+      setIsGameOver(false); 
+      setSlowEffectActive(false);
+    }
+    setGameMode(!gameMode);
+  };
+
+  const handleHit = (index: number) => {
+    if (isGameOver || playerHit[index]) return;
+    setLives(prev => {
+        const newLives = [...prev] as [number, number];
+        newLives[index] = Math.max(0, newLives[index] - 1);
+        if (newLives[index] <= 0) {
+            setIsGameOver(true);
+            playGameOverSound();
+            stopMusic();
+        } else {
+            playHitSound();
+        }
+        return newLives;
+    });
+    setPlayerHit(prev => {
+        const newHit = [...prev] as [boolean, boolean];
+        newHit[index] = true;
+        return newHit;
+    });
+    setTimeout(() => setPlayerHit(prev => {
+        const newHit = [...prev] as [boolean, boolean];
+        newHit[index] = false;
+        return newHit;
+    }), 800);
+  };
+
+  const handleHeal = (index: number) => {
+    if (lives[index] >= 20) return;
+    setLives(prev => {
+        const newLives = [...prev] as [number, number];
+        newLives[index] = Math.min(newLives[index] + 1, 20);
+        return newLives;
+    });
+    playHealSound();
+    setPlayerHeal(prev => {
+        const newHeal = [...prev] as [boolean, boolean];
+        newHeal[index] = true;
+        return newHeal;
+    });
+    setTimeout(() => setPlayerHeal(prev => {
+        const newHeal = [...prev] as [boolean, boolean];
+        newHeal[index] = false;
+        return newHeal;
+    }), 500);
+  };
+
+  const handleSlow = (index: number) => {
+    playSlowSound();
+    setSlowEffectActive(true);
+    clearTimeout(slowTimerTimeoutRef.current);
+    slowTimerTimeoutRef.current = window.setTimeout(() => setSlowEffectActive(false), 5000);
   };
 
   return (
     <div className="relative w-full h-full bg-[#050505] overflow-hidden">
       {!isStarted ? (
-        <div className="flex flex-col items-center justify-center h-full text-white text-center px-6">
+        <div className="flex flex-col items-center justify-center h-full text-white text-center px-6 animate-in fade-in duration-700">
             <div className="relative mb-8">
               <div className="absolute inset-0 bg-cyan-500/20 blur-3xl rounded-full" />
               <Zap size={80} className="text-cyan-400 relative animate-pulse" />
             </div>
-            <h1 className="text-6xl font-black mb-4 tracking-tighter">IP手势交互</h1>
-            <p className="text-gray-500 text-sm max-w-xs mb-10 tracking-widest uppercase font-bold">实时流体内核交互系统</p>
+            <h1 className="text-6xl font-black mb-4 tracking-tighter">双内核手势系统</h1>
+            <p className="text-gray-500 text-sm max-w-xs mb-10 tracking-widest uppercase font-bold">同步多线程流体交互引擎</p>
             {error && <p className="text-red-500 mb-6 bg-red-500/10 px-4 py-2 rounded-lg flex items-center gap-2 border border-red-500/20"><AlertCircle size={16}/> {error}</p>}
-            <button onClick={handleStart} className="group relative bg-white text-black px-16 py-5 rounded-full font-black text-xl overflow-hidden hover:scale-110 transition-transform active:scale-95 disabled:opacity-50" disabled={isLoading}>
+            <button onClick={handleStartInitialization} className="group relative bg-white text-black px-16 py-5 rounded-full font-black text-xl overflow-hidden hover:scale-110 transition-transform active:scale-95 disabled:opacity-50" disabled={isLoading}>
                 <div className="absolute inset-0 bg-cyan-500/10 group-hover:translate-x-full transition-transform duration-500 -skew-x-12 -translate-x-full" />
-                <span className="relative">{isLoading ? "同步中..." : "初始化系统"}</span>
+                <span className="relative">{isLoading ? "同步中..." : "启动引擎"}</span>
             </button>
-            {!isEngineReady && !isLoading && <p className="mt-4 text-[10px] text-gray-600 animate-pulse">WASM 引擎正在后台加载...</p>}
         </div>
       ) : (
         <>
@@ -223,7 +297,7 @@ const App: React.FC = () => {
               <div className="absolute inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center">
                  <div className="flex flex-col items-center gap-4">
                     <RefreshCw className="text-cyan-400 animate-spin" size={40} />
-                    <span className="text-white text-sm font-bold tracking-widest animate-pulse">正在生成内核...</span>
+                    <span className="text-white text-sm font-bold tracking-widest animate-pulse">正在重构内核数据...</span>
                  </div>
               </div>
             )}
@@ -231,44 +305,83 @@ const App: React.FC = () => {
                 <video ref={videoRef} className="w-full h-full object-cover" style={{transform: 'scaleX(-1)'}} playsInline muted />
                 <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" style={{transform: 'scaleX(-1)'}} />
             </div>
-            <Canvas camera={{ position: [0, 0, 150] }} dpr={[1, 1.5]} gl={{ antialias: false, stencil: false, depth: true }} performance={{ min: 0.5 }}>
+            <Canvas camera={{ position: [0, 0, gameType === 'DOUBLE' ? 180 : 150] }} dpr={[1, 1.5]} gl={{ antialias: false, stencil: false, depth: true }} performance={{ min: 0.5 }}>
                 <Particles 
-                    model={currentModel} 
-                    handData={handData} 
+                    model={topModel} 
+                    handData={hands[0] || null} 
                     config={config} 
-                    playerPosRef={playerPosRef} 
-                    playerScaleRef={playerScaleRef}
-                    isHit={playerHit} 
-                    isGameOver={isGameOver} 
+                    playerPosRef={playerPosRefs[0]} 
+                    playerScaleRef={playerScaleRefs[0]}
+                    isHit={playerHit[0]} 
+                    isGameOver={isGameOver}
+                    isBursting={isBursting}
+                    isSuperBursting={isSuperBursting}
                     isGameActive={gameMode} 
                 />
+                
+                {gameType === 'DOUBLE' && (
+                  <Particles 
+                      model={bottomModel} 
+                      handData={hands[1] || (hands.length === 1 ? hands[0] : null)} 
+                      config={config} 
+                      playerPosRef={playerPosRefs[1]} 
+                      playerScaleRef={playerScaleRefs[1]}
+                      isHit={playerHit[1]} 
+                      isGameOver={isGameOver}
+                      isBursting={isBursting}
+                      isSuperBursting={isSuperBursting}
+                      isGameActive={gameMode} 
+                  />
+                )}
+
                 <SpaceGame 
-                    playerPosRef={playerPosRef} 
-                    playerScaleRef={playerScaleRef}
+                    playerPosRefs={gameType === 'DOUBLE' ? playerPosRefs : [playerPosRefs[0]]} 
+                    playerScaleRefs={gameType === 'DOUBLE' ? playerScaleRefs : [playerScaleRefs[0]]}
                     isGameActive={gameMode && !isGameOver} 
-                    onHit={() => {
-                        if (isGameOver || playerHit) return;
-                        setLives(prev => {
-                            const next = prev - 1;
-                            if (next <= 0) {
-                                setIsGameOver(true);
-                                playGameOverSound();
-                                stopMusic();
-                            } else {
-                                playHitSound();
-                            }
-                            return next;
-                        });
-                        setPlayerHit(true);
-                        setTimeout(() => setPlayerHit(false), 800);
-                    }} 
+                    onHit={handleHit} 
+                    onHeal={handleHeal}
+                    onSlow={handleSlow}
                     onScore={s => setScore(prev => prev + s)} 
                     score={score} 
                 />
                 <Environment preset="night" />
                 <OrbitControls enableZoom={false} enablePan={false} enableRotate={!gameMode} />
             </Canvas>
-            <UIOverlay config={config} setConfig={setConfig} models={models} currentModelId={currentModel.id} onModelSelect={setCurrentModel} onDeleteModel={handleDeleteModel} onUpload={handleCustomUpload} gesture={handData?.gesture || GestureType.NONE} handData={handData} isFullscreen={isFullscreen} toggleFullscreen={toggleFullscreen} showCamera={showCamera} toggleCamera={() => setShowCamera(!showCamera)} gameMode={gameMode} toggleGameMode={() => setGameMode(!gameMode)} score={score} lives={lives} isGameOver={isGameOver} onRestart={() => {setIsGameOver(false); setLives(3); setScore(0); setPlayerHit(false);}} highScores={highScores} />
+            <UIOverlay 
+              config={config} 
+              setConfig={setConfig} 
+              models={models} 
+              currentModelId={topModel.id} 
+              onModelSelect={setTopModel} 
+              onDeleteModel={handleDeleteModel} 
+              onUpload={handleCustomUpload} 
+              gesture={hands[0]?.gesture || GestureType.NONE} 
+              handData={hands[0] ? { ...hands[0], burstTrigger: isBursting || isSuperBursting } : null} 
+              isFullscreen={isFullscreen} 
+              toggleFullscreen={toggleFullscreen} 
+              showCamera={showCamera} 
+              toggleCamera={() => setShowCamera(!showCamera)} 
+              gameMode={gameMode} 
+              toggleGameMode={handleToggleGameMode} 
+              gameType={gameType}
+              setGameType={setGameType}
+              score={score} 
+              lives={lives} 
+              isGameOver={isGameOver} 
+              onRestart={() => {setIsGameOver(false); setLives([10, 10]); setScore(0); setPlayerHit([false, false]); setSlowEffectActive(false);}} 
+              highScores={[]} 
+            />
+            {playerHeal.some(h => h) && (
+                <div className="absolute inset-0 pointer-events-none bg-green-500/10 animate-pulse z-[60]" />
+            )}
+            {slowEffectActive && (
+                <div className="absolute inset-0 pointer-events-none bg-yellow-500/5 animate-pulse z-[55] flex items-center justify-center">
+                    <div className="border border-yellow-500/20 bg-black/40 backdrop-blur-md px-6 py-2 rounded-full flex items-center gap-3 animate-bounce">
+                        <Zap size={16} className="text-yellow-400 fill-yellow-400" />
+                        <span className="text-yellow-400 font-black tracking-widest text-xs uppercase">全场减速中</span>
+                    </div>
+                </div>
+            )}
         </>
       )}
     </div>

@@ -9,9 +9,13 @@ let isInitializing = false;
 
 // --- Smoothing State ---
 const GESTURE_HISTORY_LENGTH = 5; 
-let previousHandData: HandData | null = null;
-let previousRawWrist: { x: number, y: number, z: number } | null = null; 
-const gestureHistory: GestureType[] = [];
+let previousHandsData: (HandData | null)[] = [null, null];
+let previousRawWrists: ({ x: number, y: number, z: number } | null)[] = [null, null]; 
+
+// 双手交互状态
+let lastHandsDistance: number | null = null;
+let burstCooldown = 0;
+let superBurstCooldown = 0;
 
 export const initializeHandLandmarker = async (): Promise<void> => {
   if (handLandmarker) return;
@@ -23,11 +27,10 @@ export const initializeHandLandmarker = async (): Promise<void> => {
     );
     const sharedOptions = {
         runningMode: runningMode,
-        numHands: 1,
-        // 提高置信度阈值，减少面部或其他背景物体的误识别
-        minHandDetectionConfidence: 0.8, 
-        minTrackingConfidence: 0.7,
-        minHandPresenceConfidence: 0.8,
+        numHands: 2, 
+        minHandDetectionConfidence: 0.7, 
+        minTrackingConfidence: 0.6,
+        minHandPresenceConfidence: 0.7,
     };
     try {
         handLandmarker = await HandLandmarker.createFromOptions(vision, {
@@ -64,7 +67,13 @@ const smoothPosition = (current: {x: number, y: number, z: number}, prev: {x: nu
     };
 };
 
-export const detectHands = (video: HTMLVideoElement, canvas: HTMLCanvasElement | null = null): HandData | null => {
+export interface DetectionResult {
+    hands: HandData[];
+    burstTrigger: boolean;
+    superBurstTrigger: boolean;
+}
+
+export const detectHands = (video: HTMLVideoElement, canvas: HTMLCanvasElement | null = null): DetectionResult | null => {
   if (!handLandmarker) return null;
   if (video.currentTime <= 0 || video.paused || video.ended || !video.readyState) return null;
 
@@ -93,34 +102,47 @@ export const detectHands = (video: HTMLVideoElement, canvas: HTMLCanvasElement |
       }
   }
 
-  // 关键校验：确保识别到了明确的左右手属性，进一步过滤面部误报
-  if (results.landmarks.length > 0 && results.handedness && results.handedness.length > 0) {
-    // MediaPipe HandLandmarker 通常在误识别脸部时，handedness 的 score 会非常低
-    if (results.handedness[0][0].score < 0.85) return null;
+  let burstTrigger = false;
+  let superBurstTrigger = false;
+  const hands: HandData[] = [];
 
-    const landmarks = results.landmarks[0];
+  // 全局爆发逻辑 (距离感应)
+  if (results.landmarks.length >= 2) {
+      const p1 = results.landmarks[0][9]; 
+      const p2 = results.landmarks[1][9];
+      const currentDist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+      if (lastHandsDistance !== null && Date.now() > burstCooldown) {
+          if (currentDist - lastHandsDistance > 0.045) {
+              burstTrigger = true;
+              burstCooldown = Date.now() + 1500;
+          }
+      }
+      lastHandsDistance = currentDist;
+  } else {
+      lastHandsDistance = null;
+  }
+
+  // 独立处理每只手
+  results.landmarks.forEach((landmarks, handIdx) => {
     const wrist = landmarks[0];
     const thumbTip = landmarks[4];
     const indexMCP = landmarks[5];
-    const indexPip = landmarks[6];
     const indexTip = landmarks[8];
-    const middlePip = landmarks[10];
+    const indexPip = landmarks[6];
     const middleTip = landmarks[12];
-    const ringPip = landmarks[14];
+    const middlePip = landmarks[10];
     const ringTip = landmarks[16];
-    const pinkyPip = landmarks[18];
+    const ringPip = landmarks[14];
     const pinkyTip = landmarks[20];
-    const indexBase = landmarks[5];
+    const pinkyPip = landmarks[18];
 
     const dist = (p1: any, p2: any) => Math.hypot(p1.x - p2.x, p1.y - p2.y, p1.z - p2.z);
     const handScale = dist(wrist, indexMCP);
     
-    // 增加物理尺寸校验：如果识别出的“手”太小，极可能是背景噪声或面部局部特征
-    if (handScale < 0.04) return null;
+    if (handScale < 0.015) return;
     
     const EXTENSION_BUFFER = handScale * 0.15; 
     const PINCH_THRESHOLD = handScale * 0.55;
-
     const isFingerExtended = (tip: any, pip: any) => dist(tip, wrist) > dist(pip, wrist) + EXTENSION_BUFFER;
 
     const indexExt = isFingerExtended(indexTip, indexPip);
@@ -131,60 +153,52 @@ export const detectHands = (video: HTMLVideoElement, canvas: HTMLCanvasElement |
 
     const tips = [indexTip, middleTip, ringTip, pinkyTip];
     const avgDistFromWrist = tips.reduce((acc, tip) => acc + dist(tip, wrist), 0) / 4;
-    
-    const minOpenDist = handScale * 1.2; 
-    const maxOpenDist = handScale * 2.8;
-    const currentOpenness = Math.min(Math.max((avgDistFromWrist - minOpenDist) / (maxOpenDist - minOpenDist), 0), 1);
+    const currentOpenness = Math.min(Math.max((avgDistFromWrist - handScale * 1.2) / (handScale * 1.6), 0), 1);
 
     let detectedGesture: GestureType = GestureType.NONE;
     const isPinchPose = dist(thumbTip, indexTip) < PINCH_THRESHOLD;
-    const isOkSign = isPinchPose && middleExt && ringExt && pinkyExt;
-    const isOpen = indexExt && middleExt && ringExt && pinkyExt && thumbExt;
-    const isFist = !indexExt && !middleExt && !ringExt && !pinkyExt;
-
-    if (isOkSign) detectedGesture = GestureType.OK_SIGN;
+    if (isPinchPose && middleExt && ringExt && pinkyExt) detectedGesture = GestureType.OK_SIGN;
     else if (isPinchPose) detectedGesture = GestureType.PINCH;
-    else if (isOpen) detectedGesture = GestureType.OPEN_HAND;
-    else if (isFist) detectedGesture = GestureType.CLOSED_FIST;
+    else if (indexExt && middleExt && ringExt && pinkyExt && thumbExt) detectedGesture = GestureType.OPEN_HAND;
+    else if (!indexExt && !middleExt && !ringExt && !pinkyExt) detectedGesture = GestureType.CLOSED_FIST;
 
-    let movementVelocity = 0;
-    if (previousRawWrist) movementVelocity = dist(wrist, previousRawWrist) / handScale; 
-    previousRawWrist = { x: wrist.x, y: wrist.y, z: wrist.z };
+    const rawWrist = { x: wrist.x, y: wrist.y, z: wrist.z };
+    const prevRawWrist = previousRawWrists[handIdx];
+    let movementVelocity = prevRawWrist ? dist(rawWrist, prevRawWrist) / handScale : 0;
+    previousRawWrists[handIdx] = rawWrist;
 
-    gestureHistory.push(detectedGesture);
-    if (gestureHistory.length > GESTURE_HISTORY_LENGTH) gestureHistory.shift();
-
-    const isFastMove = movementVelocity > 0.08; 
-    const finalSmoothingFactor = Math.min(0.15 + (isFastMove ? 0.7 : 0), 0.9);
-
-    const rawPinchPos = isPinchPose ? { x: (thumbTip.x + indexTip.x) / 2, y: (thumbTip.y + indexTip.y) / 2, z: (thumbTip.z + indexTip.z) / 2 } : null;
-    const rawPointerPos = { x: indexTip.x, y: indexTip.y, z: indexTip.z };
-    const rawPalmPos = { x: landmarks[9].x, y: landmarks[9].y, z: landmarks[9].z };
-
-    const smoothedPinch = rawPinchPos ? smoothPosition(rawPinchPos, previousHandData?.pinchPosition || null, finalSmoothingFactor) : null;
-    const smoothedPointer = smoothPosition(rawPointerPos, previousHandData?.pointerPosition || null, finalSmoothingFactor);
-    const smoothedPalm = smoothPosition(rawPalmPos, previousHandData?.palmPosition || null, finalSmoothingFactor);
-    const rotation = Math.atan2(indexBase.y - wrist.y, indexBase.x - wrist.x);
-    
-    const smoothedOpenness = previousHandData 
-        ? lerp(previousHandData.openness, currentOpenness, 0.15) 
-        : currentOpenness;
+    const finalSmoothingFactor = Math.min(0.15 + (movementVelocity > 0.08 ? 0.7 : 0), 0.9);
+    const prevData = previousHandsData[handIdx];
 
     const finalHandData: HandData = {
         gesture: detectedGesture,
-        pinchPosition: smoothedPinch,
-        pointerPosition: smoothedPointer,
-        palmPosition: smoothedPalm,
-        rotation: rotation,
-        openness: smoothedOpenness
+        pinchPosition: isPinchPose ? smoothPosition({ x: (thumbTip.x + indexTip.x) / 2, y: (thumbTip.y + indexTip.y) / 2, z: (thumbTip.z + indexTip.z) / 2 }, prevData?.pinchPosition || null, finalSmoothingFactor) : null,
+        pointerPosition: smoothPosition({ x: indexTip.x, y: indexTip.y, z: indexTip.z }, prevData?.pointerPosition || null, finalSmoothingFactor),
+        palmPosition: smoothPosition({ x: landmarks[9].x, y: landmarks[9].y, z: landmarks[9].z }, prevData?.palmPosition || null, finalSmoothingFactor),
+        rotation: Math.atan2(landmarks[5].y - wrist.y, landmarks[5].x - wrist.x),
+        openness: prevData ? lerp(prevData.openness, currentOpenness, 0.15) : currentOpenness
     };
 
-    previousHandData = finalHandData;
-    return finalHandData;
+    previousHandsData[handIdx] = finalHandData;
+    hands.push(finalHandData);
+  });
+
+  // 双拳超强大爆发逻辑
+  if (hands.length >= 2 && hands.every(h => h.gesture === GestureType.CLOSED_FIST)) {
+      if (Date.now() > superBurstCooldown) {
+          superBurstTrigger = true;
+          superBurstCooldown = Date.now() + 2000;
+      }
   }
 
-  previousHandData = null;
-  previousRawWrist = null;
-  gestureHistory.length = 0;
-  return null;
+  // 清除未检测到的手部缓存
+  if (hands.length === 0) {
+      previousHandsData = [null, null];
+      previousRawWrists = [null, null];
+  } else if (hands.length === 1) {
+      previousHandsData[1] = null;
+      previousRawWrists[1] = null;
+  }
+
+  return { hands, burstTrigger, superBurstTrigger };
 };

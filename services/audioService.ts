@@ -13,6 +13,57 @@ const getContext = () => {
 
 // --- Sound Effects ---
 
+export const playSlowSound = () => {
+  const ctx = getContext();
+  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+  const t = ctx.currentTime;
+
+  // Descending futuristic "power-down" chime
+  const osc = ctx.createOscillator();
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(600, t);
+  osc.frequency.exponentialRampToValueAtTime(150, t + 0.5);
+
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(1000, t);
+  filter.frequency.exponentialRampToValueAtTime(100, t + 0.5);
+
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(0.2, t + 0.05);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+
+  osc.connect(filter);
+  filter.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(t);
+  osc.stop(t + 0.5);
+};
+
+export const playHealSound = () => {
+  const ctx = getContext();
+  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+  const t = ctx.currentTime;
+
+  // Pleasant upward chime
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(400, t);
+  osc.frequency.exponentialRampToValueAtTime(800, t + 0.1);
+  osc.frequency.exponentialRampToValueAtTime(1200, t + 0.2);
+
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(0.3, t + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(t);
+  osc.stop(t + 0.3);
+};
+
 export const playHitSound = () => {
   const ctx = getContext();
   if (ctx.state === 'suspended') ctx.resume().catch(() => {});
@@ -40,6 +91,7 @@ export const playHitSound = () => {
   
   noise.connect(noiseFilter);
   noiseFilter.connect(noiseGain);
+  // Fixed: corrected 'gain' to 'noiseGain' to connect noise impact to destination
   noiseGain.connect(ctx.destination);
   noise.start(t);
 
